@@ -1,8 +1,8 @@
 import requests
 from flask import Flask, request, jsonify
-from myhtmlparser import MyHTMLParser
 import urllib.parse
 import json
+import datetime
 
 app = Flask(__name__)
 
@@ -12,6 +12,7 @@ class User(object):
         self.token = None
         self.details = {}
         self.children = []
+        self.plannings = []
 
     def set_token(self, token):
         self.token = token
@@ -26,29 +27,32 @@ class User(object):
         return self.details
 
     def set_children(self, data):
-        self.children = parse_children(data)
+        for child in data["kids"]:
+            self.children.append({
+                "department": {
+                    "name": child["avdeling"]["navn"],
+                    "phone": child["avdeling"]["telefon"]
+                },
+                "birthday": child["birthday"],
+                "id": child["id"],
+                "img": child["img_src"],
+                "name": "{} {}".format(child["fornavn"], child["etternavn"])
+            })
 
     def get_children(self):
         return self.children
 
-    def parse_children(self, data):
-        children = []
-        for child in data:
-            children.append({
-                "avdeling_navn": child["avdeling"]["navn"],
-                "avdeling_nummer": child["avdeling"]["telefon"],
-                "bursdag": child["birthday"],
-                "id": child["id"],
-                "img": child["img_src"],
-                "navn": "{} {}".format(child["fornavn"], child["etternavn"])
-            })
-        return children
+    def set_plannings(self, plannings):
+        self.plannings = plannings
 
+    def get_plannings(self):
+        return self.plannings
 
 user = User(app)
 LOGIN_API_URL = "https://m.mykid.no/api/authenticate"
 GET_KIDS_API_URL = "https://m.mykid.no/api/dashboard/get_kids"
-SHOW_DAY_API_URL = "https://m.mykid.no/api/week_events/day_data/110916/"
+SHOW_DAY_API_URL = "https://m.mykid.no/api/week_events/day_data"
+WEEK_EVENTS_API_URL = "https://m.mykid.no/api/week_events"
 COOKIE = "mykid"
 
 @app.route('/ping')
@@ -76,32 +80,63 @@ def login():
         "user": user.get_details()
     })
 
-@app.route("/api/children", methods=['GET'])
+@app.route("/api/children")
 def children():
     children = user.get_children()
-    if (len(children) != 0):
+    if (len(children) == 0):
         cookie = request.cookies.get(COOKIE, {})
         if (cookie):
-            decoded_cookie = urllib.parse.unquote(cookie)
-            user = json.loads(decoded_cookie)
-            token = user["token"]
-            headers = {
-                "X-Auth-Token": token
-            }
+            headers = get_header_with_token(cookie)
             res = requests.get(GET_KIDS_API_URL, headers=headers)
-            return jsonify(res.json())
+            user.set_children(res.json())
+            children = user.get_children()
         else:
             return {}
-    else:
-        return jsonify(children)
+    return jsonify(children)
 
 @app.route("/api/my_day")
 def my_day():
-    # s = user.get_session()
-    # date = "2019-03-19"
-    # res = s.get(show_day_url + date)
-    # print(res.text)
-    # parser = MyHTMLParser(res.text)
-    # data = parser.get_day()
-    data = {}
-    return jsonify(data)
+    # date = datetime.date.today()
+    # date = "2019-04-25"
+    url = "{}/{}/{}".format(SHOW_DAY_API_URL, request.args.get("child_id"), request.args.get("date"))
+    cookie = request.cookies.get(COOKIE, {})
+    if (cookie):
+        headers = get_header_with_token(cookie)
+        res = requests.get(url, headers=headers)
+        return jsonify(res.json())
+    else:
+        return {}
+
+@app.route("/api/plannings")
+def plannings():
+  plannings = user.get_plannings()
+  if len(plannings) == 0:
+      current_date = datetime.datetime.strptime(request.args.get("date"), "%Y-%m-%d")
+      cookie = request.cookies.get(COOKIE, {})
+      if (cookie):
+        headers = get_header_with_token(cookie)
+        for i in range(20): # look 20 weeks ahead
+          current_date = current_date + datetime.timedelta(days=7)
+          url = "{}/{}/{}".format(WEEK_EVENTS_API_URL, request.args.get("child_id"), str(current_date.date()))
+          res = requests.get(url, headers=headers)
+          days = res.json()
+          if len(days.get("days", [])) > 0:
+            for day in days["days"]:
+              events = day.get("events", [])
+              if len(events) > 0:
+                for event in events:
+                  if (event.get("navn", "").startswith("Planleggingsdag")):
+                    print("Found planning day")
+                    print(day["date"])
+                    plannings.append(day["date"])
+  return jsonify({
+    "planning_days": plannings
+  })
+
+def get_header_with_token(cookie):
+    decoded_cookie = urllib.parse.unquote(cookie)
+    auth_user = json.loads(decoded_cookie)
+    token = auth_user["token"]
+    return {
+        "X-Auth-Token": token
+    }

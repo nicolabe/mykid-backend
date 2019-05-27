@@ -48,6 +48,22 @@ class User(object):
     def get_plannings(self):
         return self.plannings
 
+
+class CustomError(Exception):
+    status_code = 500
+
+    def __init__(self, message, status_code=None, payload=None):
+        Exception.__init__(self)
+        self.message = message
+        if status_code is not None:
+            self.status_code = status_code
+        self.payload = payload
+
+    def to_dict(self):
+        rv = dict(self.payload or ())
+        rv['message'] = self.message
+        return rv
+
 users = {}
 LOGIN_API_URL = "https://m.mykid.no/api/authenticate"
 GET_KIDS_API_URL = "https://m.mykid.no/api/dashboard/get_kids"
@@ -86,6 +102,8 @@ def login():
 def children():
     cookie = request.cookies.get(COOKIE, {})
     user = get_user(cookie)
+    if not (user):
+        raise CustomError('Ingen bruker funnet, logg ut og inn igjen', status_code=400)
     children = user.get_children()
     if (len(children) == 0):
         if (cookie):
@@ -94,7 +112,10 @@ def children():
             user.set_children(res.json())
             children = user.get_children()
         else:
-            return {}
+            return jsonify({
+                "status_code": 400,
+                "message": "No cookie found, try logging out and back again"
+            })
     return jsonify(children)
 
 @app.route("/api/my_day")
@@ -118,7 +139,6 @@ def plannings():
         if (cookie):
             headers = get_header_with_token(cookie)
             for i in range(26): # look 26 weeks ahead
-                current_date = current_date + datetime.timedelta(days=7)
                 url = "{}/{}/{}".format(WEEK_EVENTS_API_URL, request.args.get("child_id"), str(current_date.date()))
                 res = requests.get(url, headers=headers)
                 days = res.json()
@@ -129,9 +149,16 @@ def plannings():
                             for event in events:
                                 if (event.get("navn", "").startswith("Planleggingsdag")):
                                     plannings.append(day["date"])
+                current_date = current_date + datetime.timedelta(days=7)
     return jsonify({
         "planning_days": plannings
     })
+
+@app.errorhandler(CustomError)
+def handle_invalid_usage(error):
+    response = jsonify(error.to_dict())
+    response.status_code = error.status_code
+    return response
 
 def get_user(cookie):
     if not (cookie):
